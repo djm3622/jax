@@ -143,7 +143,7 @@ bazel_packages = {
 
 
 def download_and_verify_bazel():
-  """Downloads a bazel binary from Github, verifying its SHA256 hash."""
+  """Downloads a bazel binary from GitHub, verifying its SHA256 hash."""
   package = bazel_packages.get((platform.system(), platform.machine()))
   if package is None:
     return None
@@ -255,16 +255,13 @@ def get_clang_major_version(clang_path):
   return major_version
 
 
-
 def write_bazelrc(*, python_bin_path, remote_build,
-                  cuda_toolkit_path, cudnn_install_path,
                   cuda_version, cudnn_version, rocm_toolkit_path,
                   cpu, cuda_compute_capabilities,
                   rocm_amdgpu_targets, target_cpu_features,
                   wheel_cpu, enable_mkl_dnn, use_clang, clang_path,
                   clang_major_version, enable_cuda, enable_nccl, enable_rocm,
                   build_gpu_plugin, enable_mosaic_gpu):
-  tf_cuda_paths = []
 
   with open("../.jax_configure.bazelrc", "w") as f:
     if not remote_build and python_bin_path:
@@ -285,19 +282,6 @@ def write_bazelrc(*, python_bin_path, remote_build,
         # https://github.com/openxla/xla/blob/c4277a076e249f5b97c8e45c8cb9d1f554089d76/.bazelrc#L505
         f.write("build --copt=-Wno-gnu-offsetof-extensions\n")
 
-    if cuda_toolkit_path:
-      tf_cuda_paths.append(cuda_toolkit_path)
-      f.write("build --action_env CUDA_TOOLKIT_PATH=\"{cuda_toolkit_path}\"\n"
-              .format(cuda_toolkit_path=cuda_toolkit_path))
-    if cudnn_install_path:
-      # see https://github.com/tensorflow/tensorflow/issues/51040
-      if cudnn_install_path not in tf_cuda_paths:
-        tf_cuda_paths.append(cudnn_install_path)
-      f.write("build --action_env CUDNN_INSTALL_PATH=\"{cudnn_install_path}\"\n"
-              .format(cudnn_install_path=cudnn_install_path))
-    if len(tf_cuda_paths):
-      f.write("build --action_env TF_CUDA_PATHS=\"{tf_cuda_paths}\"\n"
-              .format(tf_cuda_paths=",".join(tf_cuda_paths)))
     if cuda_version:
       f.write("build --action_env TF_CUDA_VERSION=\"{cuda_version}\"\n"
               .format(cuda_version=cuda_version))
@@ -491,14 +475,6 @@ def main():
       default=False,
       help_str="Should we build with RBE (Remote Build Environment)?")
   parser.add_argument(
-      "--cuda_path",
-      default=None,
-      help="Path to the CUDA toolkit.")
-  parser.add_argument(
-      "--cudnn_path",
-      default=None,
-      help="Path to CUDNN libraries.")
-  parser.add_argument(
       "--cuda_version",
       default=None,
       help="CUDA toolkit version, e.g., 11.1")
@@ -557,12 +533,6 @@ def main():
   if args.verbose:
     logger.setLevel(logging.DEBUG)
 
-  if is_windows() and args.enable_cuda:
-    if args.cuda_version is None:
-      parser.error("--cuda_version is needed for Windows CUDA build.")
-    if args.cudnn_version is None:
-      parser.error("--cudnn_version is needed for Windows CUDA build.")
-
   if args.enable_cuda and args.enable_rocm:
     parser.error("--enable_cuda and --enable_rocm cannot be enabled at the same time.")
 
@@ -612,21 +582,19 @@ def main():
   print(f"Target CPU: {wheel_cpu}")
   print(f"Target CPU features: {args.target_cpu_features}")
 
-  cuda_toolkit_path = args.cuda_path
-  cudnn_install_path = args.cudnn_path
   rocm_toolkit_path = args.rocm_path
   print("CUDA enabled: {}".format("yes" if args.enable_cuda else "no"))
   if args.enable_cuda:
-    if cuda_toolkit_path:
-      print(f"CUDA toolkit path: {cuda_toolkit_path}")
-    if cudnn_install_path:
-      print(f"CUDNN library path: {cudnn_install_path}")
     if args.cuda_compute_capabilities is not None:
       print(f"CUDA compute capabilities: {args.cuda_compute_capabilities}")
     if args.cuda_version:
       print(f"CUDA version: {args.cuda_version}")
+    else:
+      raise ValueError("--cuda_version should be provided")
     if args.cudnn_version:
       print(f"CUDNN version: {args.cudnn_version}")
+    else:
+      raise ValueError("--cudnn_version should be provided")
     print("NCCL enabled: {}".format("yes" if args.enable_nccl else "no"))
 
   print("ROCm enabled: {}".format("yes" if args.enable_rocm else "no"))
@@ -638,8 +606,6 @@ def main():
   write_bazelrc(
       python_bin_path=python_bin_path,
       remote_build=args.remote_build,
-      cuda_toolkit_path=cuda_toolkit_path,
-      cudnn_install_path=cudnn_install_path,
       cuda_version=args.cuda_version,
       cudnn_version=args.cudnn_version,
       rocm_toolkit_path=rocm_toolkit_path,
@@ -665,11 +631,12 @@ def main():
   print("\nBuilding XLA and installing it in the jaxlib source tree...")
 
   command_base = (
-    bazel_path,
-    *args.bazel_startup_options,
-    "run",
-    "--verbose_failures=true",
-    *args.bazel_options,
+      bazel_path,
+      *args.bazel_startup_options,
+      "run",
+      "--verbose_failures=true",
+      "--config=no_cuda_libs",
+      *args.bazel_options,
   )
   if not args.build_cuda_kernel_plugin and not args.build_cuda_pjrt_plugin:
     build_cpu_wheel_command = [
@@ -688,12 +655,14 @@ def main():
 
   if args.build_gpu_plugin or args.build_cuda_kernel_plugin:
     build_cuda_kernels_command = [
-      *command_base,
-      "//jaxlib/tools:build_cuda_kernels_wheel", "--",
-      f"--output_path={output_path}",
-      f"--jaxlib_git_hash={get_githash()}",
-      f"--cpu={wheel_cpu}",
-      f"--cuda_version={args.gpu_plugin_cuda_version}"
+        *command_base,
+        "//jaxlib/tools:build_cuda_kernels_wheel",
+        "--",
+        f"--output_path={output_path}",
+        f"--jaxlib_git_hash={get_githash()}",
+        f"--cpu={wheel_cpu}",
+        f"--cuda_version={args.gpu_plugin_cuda_version}",
+        f"--cudnn_version={args.cudnn_version}",
     ]
     if args.editable:
       build_cuda_kernels_command.append("--editable")
@@ -702,12 +671,14 @@ def main():
 
   if args.build_gpu_plugin or args.build_cuda_pjrt_plugin:
     build_pjrt_plugin_command = [
-      *command_base,
-      "//jaxlib/tools:build_gpu_plugin_wheel", "--",
-      f"--output_path={output_path}",
-      f"--jaxlib_git_hash={get_githash()}",
-      f"--cpu={wheel_cpu}",
-      f"--cuda_version={args.gpu_plugin_cuda_version}"
+        *command_base,
+        "//jaxlib/tools:build_gpu_plugin_wheel",
+        "--",
+        f"--output_path={output_path}",
+        f"--jaxlib_git_hash={get_githash()}",
+        f"--cpu={wheel_cpu}",
+        f"--cuda_version={args.gpu_plugin_cuda_version}",
+        f"--cudnn_version={args.cudnn_version}",
     ]
     if args.editable:
       build_pjrt_plugin_command.append("--editable")

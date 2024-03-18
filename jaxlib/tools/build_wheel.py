@@ -205,7 +205,7 @@ def prepare_wheel(sources_path: pathlib.Path, *, cpu, skip_gpu_kernels):
           "__main__/jaxlib/gpu_sparse.py",
           "__main__/jaxlib/version.py",
           "__main__/jaxlib/xla_client.py",
-          f"__main__/jaxlib/xla_extension.{pyext}",
+          f"xla/xla/python/xla_extension.{pyext}",
       ],
   )
   # This file is required by PEP-561. It marks jaxlib as package containing
@@ -225,7 +225,9 @@ def prepare_wheel(sources_path: pathlib.Path, *, cpu, skip_gpu_kernels):
   if exists(f"__main__/jaxlib/cuda/_solver.{pyext}") and not skip_gpu_kernels:
     copy_runfiles(
         dst_dir=jaxlib_dir / "cuda" / "nvvm" / "libdevice",
-        src_files=["local_config_cuda/cuda/cuda/nvvm/libdevice/libdevice.10.bc"],
+        src_files=[
+            "cuda_nvcc/nvvm/libdevice/libdevice.10.bc",
+        ],
     )
     copy_runfiles(
         dst_dir=jaxlib_dir / "cuda",
@@ -351,7 +353,6 @@ def prepare_wheel(sources_path: pathlib.Path, *, cpu, skip_gpu_kernels):
             "__main__/jaxlib/mlir/dialects/gpu/passes/__init__.py",
         ],
     )
-
 
   if build_utils.is_windows():
     capi_so = "__main__/jaxlib/mlir/_mlir_libs/jaxlib_mlir_capi.dll"
