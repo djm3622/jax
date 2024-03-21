@@ -213,6 +213,13 @@ def _hash_serialized_compile_options(hash_obj, compile_options_obj,
   # path changes across runs despite being the same version, so we clear it
   # here.
   debug_options.xla_gpu_cuda_data_dir = ""
+
+  # If AutoPGLE is used we want to store the module under the cache_key which only
+  # considers the fact of AutoPGLE usage, but not FDO profile itself, so later
+  # we can extract the module without calculating the profile.
+  if config.pgle_profiling_runs.value > 0:
+    compile_options_copy.executable_build_options.fdo_profile = bytes(
+        config.pgle_profiling_runs.value > 0)
   # LINT.ThenChange(:xla_flags)
 
   if strip_device_assignment and compile_options_copy.device_assignment:

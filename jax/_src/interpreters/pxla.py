@@ -61,6 +61,7 @@ from jax._src.interpreters import partial_eval as pe
 from jax._src.interpreters import mlir
 from jax._src.interpreters import xla
 from jax._src.layout import DeviceLocalLayout, AutoLayout, Layout
+from jax._src.lib import xla_extension_version
 from jax._src.lib import xla_client as xc
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import hlo
@@ -1111,14 +1112,15 @@ class ExecuteReplicated:
   __slots__ = ['xla_executable', 'name', 'backend', 'in_handler', 'out_handler',
                'has_unordered_effects', 'ordered_effects', 'keepalive',
                'has_host_callbacks', '_local_devices', 'kept_var_idx',
-               'mut', '__weakref__']
+               'mut', 'profile_session_runner', '__weakref__']
 
   def __init__(self, xla_executable, name, backend, in_handler: InputsHandler,
                out_handler: ResultsHandler,
                unordered_effects: list[core.Effect],
                ordered_effects: list[core.Effect], keepalive: Any,
                has_host_callbacks: bool, kept_var_idx: set[int],
-               mut: MutationData | None):
+               mut: MutationData | None,
+               profile_session_runner: profiler.ProfileSessionRunner | None = None):
     self.xla_executable = xla_executable
     self.name = name
     self.backend = backend
@@ -1131,6 +1133,7 @@ class ExecuteReplicated:
     self.has_host_callbacks = has_host_callbacks
     self.kept_var_idx = kept_var_idx
     self.mut = mut
+    self.profile_session_runner = profile_session_runner
 
   def _add_tokens_to_inputs(self, input_bufs):
     if self.ordered_effects:
@@ -1174,15 +1177,18 @@ class ExecuteReplicated:
     if (self.ordered_effects or self.has_unordered_effects
         or self.has_host_callbacks):
       input_bufs = self._add_tokens_to_inputs(input_bufs)
-      results = self.xla_executable.execute_sharded(
-          input_bufs, with_tokens=True
-      )
+      with profiler.ProfileSessionRunner.trace(self.profile_session_runner):
+        results = self.xla_executable.execute_sharded(
+            input_bufs, with_tokens=True
+        )
+
       result_token_bufs = results.disassemble_prefix_into_single_device_arrays(
           len(self.ordered_effects))
       sharded_runtime_token = results.consume_token()
       self._handle_token_bufs(result_token_bufs, sharded_runtime_token)
     else:
-      results = self.xla_executable.execute_sharded(input_bufs)
+      with profiler.ProfileSessionRunner.trace(self.profile_session_runner):
+        results = self.xla_executable.execute_sharded(input_bufs)
     if dispatch.needs_check_special():
       out_arrays = results.disassemble_into_single_device_arrays()
       for arrays in out_arrays:
@@ -2056,7 +2062,8 @@ def lower_sharding_computation(
     keep_unused: bool,
     inline: bool,
     devices_from_context: Sequence[xc.Device] | None = None,
-    lowering_parameters: mlir.LoweringParameters
+    lowering_parameters: mlir.LoweringParameters,
+    profile_session_runner: profiler.ProfileSessionRunner | None = None,
 ) -> MeshComputation:
   """Lowers a computation to XLA. It can take arbitrary shardings as input.
 
@@ -2163,7 +2170,8 @@ def lower_sharding_computation(
       pmap_nreps=nreps,
       shape_poly_state=shape_poly_state,
       all_default_mem_kind=all_default_mem_kind,
-      all_args_info=all_args_info)
+      all_args_info=all_args_info,
+      profile_session_runner=profile_session_runner)
 
 
 def _to_logical_sharding(
@@ -2339,7 +2347,8 @@ def lower_mesh_computation(
       in_layouts=(None,) * len(global_in_avals),
       out_layouts=(None,) * len(global_out_avals),
       shape_poly_state=lowering_result.shape_poly_state,
-      all_args_info=None)
+      all_args_info=None,
+      profile_session_runner=None)
 
 class MeshComputation(stages.XlaLowering):
   _hlo: ir.Module | None
@@ -2618,7 +2627,8 @@ def _cached_compilation(computation, name, mesh, spmd_lowering,
                         tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
                         allow_prop_to_outputs, host_callbacks, backend,
                         da, pmap_nreps, compiler_options_keys,
-                        compiler_options_values):
+                        compiler_options_values,
+                        profile_session_runner):
   # TODO(phawkins): One would normally just write:
   # dev = np.array(device_assignment)
   # The formulation below is substantially faster if there are many devices.
@@ -2676,7 +2686,8 @@ def _cached_compilation(computation, name, mesh, spmd_lowering,
       "Finished XLA compilation of {fun_name} in {elapsed_time} sec",
       fun_name=name, event=dispatch.BACKEND_COMPILE_EVENT):
     xla_executable = compiler.compile_or_get_cached(
-        backend, computation, dev, compile_options, host_callbacks)
+        backend, computation, dev, compile_options, host_callbacks,
+        profile_session_runner)
   return xla_executable
 
 
@@ -2785,6 +2796,7 @@ class UnloadedMeshExecutable:
   in_layouts: Sequence[DeviceLocalLayout | None]
   out_layouts: Sequence[DeviceLocalLayout | None]
   all_args_info: AllArgsInfo | None
+  profile_session_runner: profiler.ProfileSessionRunner | None
 
   def build_unsafe_call(self):
     handle_args = InputsHandler(self.input_shardings)
@@ -2794,7 +2806,8 @@ class UnloadedMeshExecutable:
     unsafe_call = ExecuteReplicated(  # type: ignore  # assignment
         self.xla_executable, self.name, self.backend, handle_args,
         handle_outs, self.unordered_effects, self.ordered_effects, self.keepalive,
-        bool(self.host_callbacks), self.kept_var_idx, self.mut)
+        bool(self.host_callbacks), self.kept_var_idx, self.mut,
+        self.profile_session_runner)
     return unsafe_call
 
   def load(self) -> MeshExecutable:
@@ -2832,6 +2845,7 @@ class UnloadedMeshExecutable:
                all_default_mem_kind: bool = True,
                all_args_info: AllArgsInfo | None = None,
                compiler_options=None,
+               profile_session_runner: profiler.ProfileSessionRunner | None = None
   ) -> MeshExecutable:
     if shape_poly_state is not None and shape_poly_state.uses_dim_vars:
       hlo = mlir.refine_polymorphic_shapes(hlo)
@@ -2861,7 +2875,7 @@ class UnloadedMeshExecutable:
         hlo, name, mesh, spmd_lowering,
         tuple_args, auto_spmd_lowering, allow_prop_to_inputs,
         allow_prop_to_outputs, tuple(host_callbacks), backend, da, pmap_nreps,
-        compiler_options_keys, compiler_options_values)
+        compiler_options_keys, compiler_options_values, profile_session_runner)
 
     if auto_spmd_lowering:
       assert mesh is not None
@@ -2911,7 +2925,8 @@ class UnloadedMeshExecutable:
         auto_spmd_lowering=auto_spmd_lowering,
         in_layouts=in_layouts,  # type: ignore
         out_layouts=out_layouts,  # type: ignore
-        all_args_info=all_args_info).load()  # type: ignore
+        all_args_info=all_args_info,
+        profile_session_runner=profile_session_runner).load()  # type: ignore
 
 
 class MeshExecutableFastpathData(NamedTuple):
@@ -3039,7 +3054,10 @@ class MeshExecutable(stages.XlaExecutable):
             self.unsafe_call.in_handler.input_indices)
       else:
         fastpath_data = None
-      return outs, fastpath_data
+      if xla_extension_version > 262:
+        return outs, fastpath_data, False  # Do not remove cache entry
+      else:
+        return outs, fastpath_data
 
     return xc._xla.pjit(
         self.unsafe_call.name, None, aot_cache_miss, [], [], [],

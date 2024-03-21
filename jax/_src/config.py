@@ -217,7 +217,8 @@ def trace_context():
           debug_key_reuse.value,
           jax_xla_profile_version.value,
           # Technically this affects jaxpr->stablehlo lowering, not tracing.
-          hlo_source_file_canonicalization_regex.value)
+          hlo_source_file_canonicalization_regex.value,
+          pgle_profiling_runs.value)
 
 config = Config()
 
@@ -815,6 +816,7 @@ class _GlobalExtraJitContext(NamedTuple):
   threefry_gpu_kernel_lowering: bool = False
   softmax_custom_jvp: bool = False
   xla_profile_version: int = 0
+  pgle_profiling_runs: int = 0
 
 
 def _update_global_jit_state(**kw):
@@ -850,6 +852,7 @@ class _ThreadLocalExtraJitContext(NamedTuple):
   threefry_gpu_kernel_lowering: bool | None = None
   softmax_custom_jvp: bool | None = None
   xla_profile_version: int | None = None
+  pgle_profiling_runs: int | None = None
 
 
 class _ThreadLocalStateCache(threading.local):
@@ -1213,6 +1216,22 @@ share_binary_between_hosts_timeout_ms = define_int_state(
     name='jax_share_binary_between_hosts_timeout_ms',
     default=20 * 60 * 1000,
     help='Timeout for the compiled module share.',
+)
+
+pgle_profiling_runs = define_int_state(
+    name='jax_pgle_profiling_runs',
+    default=0,
+    help=(
+        'If set to greater then 0, the modules will be recompiled after '
+        'running specified number times with collected data provided to the '
+        'profile guided latency estimator.'
+    ),
+    update_global_hook=lambda val: _update_global_jit_state(
+        pgle_profiling_runs=val
+    ),
+    update_thread_local_hook=lambda val: update_thread_local_jit_state(
+        pgle_profiling_runs=val
+    ),
 )
 
 enable_compilation_cache = define_bool_state(
