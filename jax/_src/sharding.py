@@ -29,21 +29,26 @@ XLADeviceAssignment = Sequence[Device]
 
 @functools.lru_cache(maxsize=4096)
 def _addressable_devices_indices_map(
-    sharding: Sharding, global_shape: Shape) -> Mapping[Device, Index | None]:
+    sharding: Sharding, global_shape: Shape
+) -> Mapping[Device, Index | None]:
   global_map = sharding.devices_indices_map(global_shape)
   if sharding.is_fully_addressable:
     return global_map
   if hasattr(sharding, '_internal_device_list'):
-    return {d: global_map[d]
-            for d in sharding._internal_device_list.addressable_device_list}
-  return {d: ind for d, ind in global_map.items()
-          if d.process_index == d.client.process_index()}
+    return {
+        d: global_map[d]
+        for d in sharding._internal_device_list.addressable_device_list
+    }
+  return {
+      d: ind
+      for d, ind in global_map.items()
+      if d.process_index == d.client.process_index()
+  }
 
 
 @util.use_cpp_class(xc.Sharding)
 class Sharding:
-  """Describes how a :class:`jax.Array` is laid out across devices.
-  """
+  """Describes how a :class:`jax.Array` is laid out across devices."""
 
   # Abstract methods below that subclasses should implement.
   @property
@@ -56,7 +61,8 @@ class Sharding:
     raise NotImplementedError('Subclasses should implement this method.')
 
   def devices_indices_map(
-      self, global_shape: Shape) -> Mapping[Device, Index | None]:
+      self, global_shape: Shape
+  ) -> Mapping[Device, Index | None]:
     """Returns a mapping from devices to the array slices each contains.
 
     The mapping includes all global devices, i.e., including
@@ -118,16 +124,21 @@ class Sharding:
   @functools.cached_property
   def addressable_devices(self) -> set[Device]:
     """The set of devices in the :class:`Sharding` that are addressable by the
-       current process.
+
+    current process.
     """
     # Add a fast path for single controller runtimes.
     if xb.process_count() == 1:
       return self.device_set
-    return {d for d in self.device_set
-            if d.process_index == d.client.process_index()}
+    return {
+        d
+        for d in self.device_set
+        if d.process_index == d.client.process_index()
+    }
 
   def addressable_devices_indices_map(
-      self, global_shape: Shape) -> Mapping[Device, Index | None]:
+      self, global_shape: Shape
+  ) -> Mapping[Device, Index | None]:
     """A mapping from addressable devices to the slice of array data each contains.
 
     ``addressable_devices_indices_map`` contains that part of

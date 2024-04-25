@@ -1376,3 +1376,127 @@ def parse_flatten_op_sharding(hlo_sharding: xc.OpSharding | xc.HloSharding,
         ParsedPartitionSpec('<internally generated spec>', partitions))]
   else:
     raise AssertionError("Unhandled OpSharding type. Please open a bug report!")
+
+
+def _slice_as_tuple(s: slice):
+  assert s.step is None
+  return (s.start, s.stop)
+
+
+def process_slice_size(
+    tensor_sharding: sharding.Sharding, global_shape: Shape, dim: int
+) -> int:
+  """Returns the size of the slice for given dimension that this host holds.
+
+  Each host can have multiple number of devices that are spanning
+  possibly discontiguous slices of data. This function computes the
+  total number of indices for dimension `dim` that any of its
+  addressable devices hold.
+
+  In most cases the addressable shard form a sparse grid, and thus
+  each host will hold the same of number of indices for each dimension.
+  However, it is possible to design a mesh that addressable shards form
+  a complicated pattern. In that case, the returned shape is simply
+  the number of indices that are accessed by this host.
+
+  For example, suppose the sharding looks like this: (number indicates
+  the host index)
+
+    1221
+    1221
+    0000
+
+  Then on host 1 and 2, both dim 0 (rows), and  dim=1 (cols) will have size 2,
+  while on host 0, dim 0  will have size 1, and dim 1 will have size 4.
+
+  Args:
+    global_shape: global shape of the tensor.
+
+  Returns:
+    The size of the slice for dimension `dim` that this host holds.
+  """
+  # TODO(sandler): Consdier caching this and functions below
+  addressables = tensor_sharding.addressable_devices_indices_map(global_shape)
+  num_unique_slices = len({
+      _slice_as_tuple(addressable[dim]) for addressable in addressables.values()
+  })
+  shard_size = tensor_sharding.shard_shape(global_shape)[dim]
+  return shard_size * num_unique_slices
+
+
+def is_process_uniform(self, dim: int, global_shape: Shape) -> bool:
+  """Returns whether this sharding is process uniform in the given dimension.
+
+  Sharding is process uniform if the following two conditions hold:
+    a) the number of accessible indices in the given dimension is the same
+      for all hosts (e.g. get_process_slice_size(dim) returns the same value).
+    b) All hosts either accesses the same set of slices or disjoint (no partial
+      overlap is allowed).
+
+  For example:
+    1111 and 12 and 1212
+    2222     21     2121
+
+  are sharding uniform, in both dimensions. However
+
+    1122
+    2121
+    1121
+    1222
+
+  is uniform in dimension 0 (both hosts access all rows)
+  is not uniform in dimension 1 (host 1 accesses columns: 0, 1, and 3),
+  while host 2 accesses (0, 1, 2, 3).
+
+  Args:
+    dim: dimension to check.
+  """
+  try:
+    return self.process_index_for_dim(global_shape, dim) is not None
+  except ValueError:
+    return False
+
+def process_index_for_dim(
+    tensor_sharding: sharding.Sharding, global_shape: Shape, dim: int
+) -> tuple[int, int]:
+  """Returns index of this process for the given dimension.
+
+  This function facilitates mapping  of process-level data to individual
+  devices. Each process can use its index to load the data corresponding
+  to the index. If process level data is sharded multiple ways,
+  this function can be used to build the cross product of indices in
+  each sharded axe. Processes that need to load the same data will have
+  the same index.
+
+  Requires sharding to be process uniform in the given dimension.
+
+  Returns:
+    A tuple of (index, num_distinct_shards) for the given dimension.
+  Raises:
+    ValueError if the sharding is not process uniform.
+  """
+  if tensor_sharding.is_fully_addressable or tensor_sharding.is_fully_replicated:
+    return (0, 1)
+  # NB: For most types of shardings, global_shape is a superfluous argument
+  # and could be replaced by [d, d, ...., d, d], where d is the number of
+  # devices.
+  device_map = tensor_sharding.devices_indices_map(global_shape)
+  global_slice = {k: v[dim] for k, v in device_map.items()}
+  process_map = {}
+  all_slices = set()
+
+  current_process_id = next(iter(tensor_sharding.addressable_devices)).process_index
+  for d, v in global_slice.items():
+    key = (v.start, v.stop)
+    process_map.setdefault(d.process_index, set()).add(key)
+    all_slices.add(key)
+  addressable = process_map[current_process_id]
+  slices_per_process = len(next(iter(process_map.values())))
+  if any(len(x) != slices_per_process for x in process_map.values()):
+    raise ValueError(f'{sharding=} is non-uniform on {dim=}')
+  unique_processes = list({frozenset(x) for x in process_map.values()})
+
+  # After removing dulicate processes each slide should appear exactly once.
+  if sum(len(h) for h in unique_processes) != len(all_slices):
+    raise ValueError(f'{sharding=} is non-uniform on {dim=}')
+  return (unique_processes.index(addressable), len(unique_processes))

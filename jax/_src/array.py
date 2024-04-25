@@ -15,13 +15,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 import enum
+import functools
 import math
 import operator as op
-import numpy as np
-import functools
-from typing import Any, Callable, cast, TYPE_CHECKING
-from collections.abc import Sequence
+from typing import Any, Callable, TYPE_CHECKING, cast
 
 from jax._src import abstract_arrays
 from jax._src import api
@@ -40,13 +39,17 @@ from jax._src.lib import xla_extension as xe
 from jax._src.interpreters import mlir
 from jax._src.interpreters import pxla
 from jax._src.interpreters import xla
+from jax._src.layout import AutoLayout, DeviceLocalLayout, Layout
+from jax._src.lib import xla_client as xc
+from jax._src.lib import xla_extension as xe
+from jax._src.lib import xla_extension_version
 from jax._src.sharding import Sharding
 from jax._src.sharding_impls import (
-    SingleDeviceSharding, XLACompatibleSharding, PmapSharding,
-    device_replica_id_map, hashed_index)
-from jax._src.layout import DeviceLocalLayout, Layout, AutoLayout
+    PmapSharding, SingleDeviceSharding, XLACompatibleSharding,
+    device_replica_id_map, hashed_index, process_slice_size)  # pyformat: disable
 from jax._src.typing import ArrayLike, DLDeviceType
 from jax._src.util import safe_zip, unzip3, use_cpp_class, use_cpp_method
+import numpy as np
 
 
 Shape = tuple[int, ...]
@@ -645,6 +648,8 @@ def make_array_from_callback(
       input and returns the corresponding data of the global array value.
       The data can be returned as any array-like object, e.g. a ``numpy.ndarray``.
 
+      TODO: Document what value None to data_callback means.
+
   Returns:
     A ``jax.Array`` via data fetched from ``data_callback``.
 
@@ -723,6 +728,97 @@ def make_array_from_callback(
     return aval.dtype._rules.make_sharded_array(aval, sharding, arrays,
                                                 committed=True)
   return ArrayImpl(aval, sharding, arrays, committed=True)
+
+
+def make_array_from_process_local_data(
+    sharding: Sharding,
+    global_shape: tuple[int, ...],
+    local_data: np.ndarray,
+) -> ArrayImpl:
+  """Creates distributed tensor using the data available in process.
+
+  Note, if the two hosts are replicas, host_local_data should be identical as
+  well. Use sharding.process_index_for_dim to find out what shard index current
+  process should be loading.
+
+  Each dimension of the shape of host_local_data should either match
+  global_shape or process_slice_size(global_shape). In the former case
+  each device slice will just lookup the  slice in the host data.
+  In the latter case the global slice of each device will be mapped into local
+  slice of this host array. For example,  if given process only
+  addresses slices (8, 12) and  (24, 28), then these slices will be
+  mapped into (0, 2) and (2, 4) of the local array.
+
+  This function can be used to create tensors from dataset feeding pipelines.
+
+  For instance if the dataset produces batches of data they can be combined into
+  a single tensor using this function.
+
+  >>> from jax.sharding import Mesh
+  >>> from jax.sharding import PartitionSpec as P
+  ...
+  >>> # Assume 8 devices: 4 hosts, 2 devices per host.
+  >>> mesh = Mesh(np.array(jax.devices()).reshape(2, 2, 2), ('x', 'y', 'z'))
+  >>> # First dimension batched by 'x', 'y', the second by 'z'
+  >>> sharding = jax.sharding.NamedSharding(mesh, P(('x', 'z'), 'y')
+  ...
+  >>> # Batch dimension is sharded 4-way, but 2 of those are within host
+  >>> per_host_batch_slice = process_slice_size(sharding, (1024, 128), 0)  # 512
+  >>> index, num_shards = process_index_for_dim(sharding, (1024, 128), 0)
+  >>> #  Load 'index'-th shard out of num_shards externally
+  >>> # Load data assuming that pipeline produces data that is not sharded
+  >>> # in the second dimension
+  >>> # Host 0 and 1 would load the same data, and so will host 2 and 3.
+  >>> local_data = _LOAD_DATA(infeed_index=index,
+  ...                         num_infeed_hosts=num_shards,
+  ...                         batch=host_shape[0])
+  >>> r = make_array_from_host_local_data(sharding, (1024, 128), local_data)
+
+  Args:
+    sharding: sharding of the global tensor.
+    global_shape: shape of the global tensor.
+    host_local_data: data on the host to be placed on local devices
+
+  Returns:
+    tensor that will have sharding=sharding.
+  """
+  shard_shape = sharding.shard_shape(global_shape)
+  full_dim = []
+  for i, (data_dim, global_dim) in enumerate(zip(local_data.shape, global_shape)):
+    full_dim.append(data_dim == global_dim)
+    if data_dim != global_dim:
+      process_slice = process_slice_size(sharding, global_shape, i)
+      if process_slice != data_dim:
+        raise ValueError(
+            "Invalid host data, each dimension should match either global or "
+            f"process shape. In dimension {i=}, the process data has {data_dim}"
+            f"elements. Process addresses {process_slice} elements and "
+            f"{global_shape=}."
+        )
+  addressable_shards = sharding.addressable_devices_indices_map(global_shape)
+  slices_for_each_dim: list[list[int]] = [[] for _ in global_shape]
+  for shard_index in addressable_shards.values():
+    assert shard_index is not None
+    for i, slc in enumerate(shard_index):
+      slices_for_each_dim[i].append(slc.start or 0)
+  for i in range(len(global_shape)):
+    slices_for_each_dim[i] = sorted(set(slices_for_each_dim[i]))
+
+  def local_slice(i, slc):
+    # Looks up the index of this slice in the list of slices for this dimension.
+    # This will determine the slice in host_local_data
+    start = slices_for_each_dim[i].index(slc.start or 0) * shard_shape[i]
+    end = start + shard_shape[i]
+    return slice(start, end)
+
+  def cb(index: Index) -> ArrayLike:
+    data_slice = [
+        slc if full_dim[i] else local_slice(i, slc)
+        for i, slc in enumerate(index)
+    ]
+    return local_data[tuple(data_slice)]
+
+  return make_array_from_callback(global_shape, sharding, cb)
 
 
 def make_array_from_single_device_arrays(
