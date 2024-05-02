@@ -555,3 +555,28 @@ def _sytrd_hlo(platform, gpu_solver, dtype, a, *, lower):
 
 cuda_sytrd = partial(_sytrd_hlo, "cu", _cusolver)
 rocm_sytrd = partial(_sytrd_hlo, "hip", _hipsolver)
+
+def _cholesky_update_hlo(platform, gpu_solver, r_matrix, w_vector):
+  """Cholesky update."""
+  del platform
+  r_type = ir.RankedTensorType(r_matrix.type)
+  dims = r_type.shape
+  assert dims[0] == dims[1]
+  n = dims[0]
+
+  if not gpu_solver:
+    raise GpuLibNotLinkedError()
+
+  opaque = gpu_solver.build_cholesky_update_descriptor(n)
+
+  return custom_call(
+      "cu_cholesky_update",
+      operands = [r_matrix, w_vector],
+      result_types=[
+          ir.RankedTensorType.get((n, n), r_type.element_type),
+          ir.RankedTensorType.get((n,), r_type.element_type),
+      ],
+      backend_config=opaque,
+  ).results[:1]
+cuda_cholesky_update = partial(_cholesky_update_hlo, "cu", _cusolver)
+

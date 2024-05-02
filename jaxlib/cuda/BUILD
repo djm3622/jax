@@ -200,6 +200,7 @@ pybind_extension(
     }),
     module_name = "_solver",
     deps = [
+        ":cholesky_update_kernel",
         ":cuda_gpu_kernel_helpers",
         ":cuda_vendor",
         ":cusolver_kernels",
@@ -302,6 +303,40 @@ cuda_library(
     ],
 )
 
+cc_library(
+    name = "cholesky_update_kernel",
+    srcs = [
+        "//jaxlib/gpu:cholesky_update_kernel.cc",
+    ],
+    hdrs = ["//jaxlib/gpu:cholesky_update_kernel.h"],
+    features = ["-use_header_modules"],
+    deps = [
+        ":cholesky_update_kernel_impl",
+        ":cuda_gpu_kernel_helpers",
+        ":cuda_vendor",
+        "//jaxlib:kernel_helpers",
+        "@xla//xla/service:custom_call_status",
+        "@com_google_absl//absl/status",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+)
+
+cuda_library(
+    name = "cholesky_update_kernel_impl",
+    srcs = [
+        "//jaxlib/gpu:cholesky_update_kernel.cu.cc",
+    ],
+    hdrs = ["//jaxlib/gpu:cholesky_update_kernel.h"],
+    features = ["-use_header_modules"],
+    deps = [
+        ":cuda_gpu_kernel_helpers",
+        ":cuda_vendor",
+        "//jaxlib:kernel_helpers",
+        "@xla//xla/service:custom_call_status",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+)
+
 pybind_extension(
     name = "_linalg",
     srcs = ["//jaxlib/gpu:linalg.cc"],
@@ -312,6 +347,7 @@ pybind_extension(
     features = ["-use_header_modules"],
     module_name = "_linalg",
     deps = [
+        ":cholesky_update_kernel",
         ":cuda_gpu_kernel_helpers",
         ":cuda_lu_pivot_kernels",
         ":cuda_lu_pivot_kernels_impl",
@@ -378,6 +414,7 @@ cc_library(
     srcs = ["//jaxlib/gpu:gpu_kernels.cc"],
     visibility = ["//visibility:public"],
     deps = [
+        ":cholesky_update_kernel",
         ":cublas_kernels",
         ":cuda_lu_pivot_kernels",
         ":cuda_prng_kernels",

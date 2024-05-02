@@ -44,6 +44,7 @@ from jax._src.lib import gpu_linalg
 from jax._src.lib import gpu_solver
 from jax._src.lib import gpu_sparse
 from jax._src.lib import lapack
+from jax._src.lib import version as jaxlib_version
 from jax._src.lib import xla_client
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import chlo
@@ -166,6 +167,20 @@ def eigh(
       subset_by_index=subset_by_index,
   )
   return v, w
+
+
+def cholesky_update(r_matrix: ArrayLike, w_vector: ArrayLike) -> Array:
+  """Given a Cholesky decomposition A = R.T @ R and a vector w,
+  computes the Cholesky decomposition of A + w @ w.T in O(N^2) time.
+
+  Args:
+    r_matrix: An upper-triangular matrix (R) such that A = R.T @ R.
+    w_vector: A vector (w) for rank-1 update.
+
+  Returns:
+    A new R' matrix being the Cholesky decomposition of A + w @ w.T.
+  """
+  return cholesky_update_p.bind(r_matrix, w_vector)
 
 
 def lu_pivots_to_permutation(pivots: ArrayLike, permutation_size: int) -> Array:
@@ -465,6 +480,50 @@ def _cholesky_cpu_lowering(ctx, operand):
 
 mlir.register_lowering(
     cholesky_p, _cholesky_cpu_lowering, platform='cpu')
+
+# Cholesky update
+
+def _cholesky_update_abstract_eval(r_matrix, w_vector):
+  r_dtype = dtypes.canonicalize_dtype(r_matrix.dtype)
+  w_dtype = dtypes.canonicalize_dtype(w_vector.dtype)
+  if not (r_dtype == np.float64 and w_dtype == np.float64):
+    raise NotImplementedError(
+        "Rank-1 Cholesky update is only implemented for float64.")
+  if not (r_matrix.ndim == 2 and w_vector.ndim == 1
+          and r_matrix.shape[-2] == r_matrix.shape[-1]
+          and r_matrix.shape[-2] == w_vector.shape[-1]):
+    raise ValueError(
+        "Rank-1 update to Cholesky decomposition takes a square matrix "
+        "and a vector as inputs. Got shapes {}, {} instead".format(
+            r_matrix.shape, w_vector.shape))
+  return ShapedArray(r_matrix.shape, r_matrix.dtype)
+
+def _cholesky_update_lowering_rule(ctx, r_matrix, w_vector):
+  try:
+    [platform] = ctx.module_context.platforms
+  except ValueError:
+    raise ValueError(
+        "Can only lower cholesky_update on a single platform."
+    ) from None
+  if platform != "cuda":
+    raise NotImplementedError(
+        "Can only lower cholesky_update on CUDA."
+    )
+  if jaxlib_version < (0, 4, 28):
+    raise NotImplementedError(
+        "The jaxlib version is too old. Please update to at least 0.4.28.")
+  return gpu_solver.cuda_cholesky_update(r_matrix, w_vector)
+
+
+cholesky_update_p = Primitive('cholesky_update')
+cholesky_update_p.multiple_results = False
+cholesky_update_p.def_abstract_eval(_cholesky_update_abstract_eval)
+cholesky_update_p.def_impl(partial(dispatch.apply_primitive, cholesky_update_p))
+
+mlir.register_lowering(
+    cholesky_update_p, _cholesky_update_lowering_rule, platform='cuda')
+
+
 
 # Asymmetric eigendecomposition
 

@@ -23,11 +23,13 @@ limitations under the License.
 #include "nanobind/stl/pair.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_format.h"
+#include "jaxlib/gpu/cholesky_update_kernel.h"
 #include "jaxlib/gpu/gpu_kernel_helpers.h"
 #include "jaxlib/gpu/solver_kernels.h"
 #include "jaxlib/gpu/vendor.h"
 #include "jaxlib/kernel_nanobind_helpers.h"
 #include "xla/tsl/python/lib/core/numpy.h"
+
 
 namespace jax {
 namespace JAX_GPU_NAMESPACE {
@@ -459,6 +461,10 @@ std::pair<int, nb::bytes> BuildSytrdDescriptor(const dtype& dtype, bool lower,
   return {lwork, PackDescriptor(SytrdDescriptor{type, uplo, b, n, n, lwork})};
 }
 
+nb::bytes BuildCholeskyUpdateDescriptor(std::int64_t matrix_size) {
+  return PackDescriptor(CholeskyUpdateDescriptor{matrix_size});
+}
+
 nb::dict Registrations() {
   nb::dict dict;
   dict[JAX_GPU_PREFIX "solver_getrf"] = EncapsulateFunction(Getrf);
@@ -472,6 +478,7 @@ nb::dict Registrations() {
 #ifdef JAX_GPU_CUDA
   dict["cusolver_csrlsvqr"] = EncapsulateFunction(Csrlsvqr);
   dict["cusolver_gesvdj"] = EncapsulateFunction(Gesvdj);
+  dict["cu_cholesky_update"] = EncapsulateFunction(CholeskyUpdate);
 #endif  // JAX_GPU_CUDA
   return dict;
 }
@@ -489,6 +496,7 @@ NB_MODULE(_solver, m) {
 #ifdef JAX_GPU_CUDA
   m.def("build_csrlsvqr_descriptor", &BuildCsrlsvqrDescriptor);
   m.def("build_gesvdj_descriptor", &BuildGesvdjDescriptor);
+  m.def("build_cholesky_update_descriptor", &BuildCholeskyUpdateDescriptor);
 #endif  // JAX_GPU_CUDA
 }
 
