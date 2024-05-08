@@ -8,6 +8,12 @@ Remember to align the itemized text with the first line of an item within a list
 
 ## jax 0.4.28
 
+* Changes
+  * Async dispatch expensive computations on the CPU backend. This only applies
+    to non-parallel computations, as we already do async dispatch for parallel
+    computations. You can recover the old behavior by setting
+    `jax.config.update('jax_cpu_enable_async_dispatch', False)`.
+
 * Deprecations & removals
   * The ``kind`` argument to {func}`jax.numpy.sort` and {func}`jax.numpy.argsort`
     is now removed. Use `stable=True` or `stable=False` instead.
