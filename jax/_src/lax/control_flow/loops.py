@@ -47,6 +47,7 @@ from jax._src.interpreters import xla
 from jax._src.lax import lax
 from jax._src.lax import slicing
 from jax._src.lax import windowed_reductions
+from jax._src.lib import xla_extension_version
 from jax._src.lib.mlir import ir
 from jax._src.lib.mlir.dialects import hlo
 from jax._src import state
@@ -2428,16 +2429,24 @@ def _cumulative_reduction_primitive(name, reduce_fn, reduce_window_fn):
         mlir.cache_lowering(mlir.lower_fun(fn, multiple_results=False)),
         platform=platform)
 
-  # Default for platforms not treated specially below.
-  register_lowering(partial(associative_scan, reduce_fn))
-  # On GPU, we choose between window reduction and associative scan
-  # based on the input size.
-  for platform in ['cuda', 'rocm']:
-    register_lowering(
-        partial(cumred_gpu_impl, reduce_window_fn, reduce_fn), platform)
-  # On TPU, an implementation using reduce_window is handled specially by the
-  # compiler and is efficient. On other backends, it is O(n^2).
-  register_lowering(partial(cumred_reduce_window_impl, reduce_window_fn), 'tpu')
+  # In XLA, there's a rewriter for an O(N^2) reduce-window implementation.
+  register_lowering(partial(cumred_reduce_window_impl, reduce_window_fn))
+
+  # Older XLA versions only have this rewrite for TPU.
+  if xla_extension_version < 263:
+
+    register_lowering(partial(cumred_reduce_window_impl, reduce_window_fn),
+                      'tpu')
+
+    # Default for platforms not treated specially below.
+    register_lowering(partial(associative_scan, reduce_fn))
+
+    # On GPU, we choose between window reduction and associative scan
+    # based on the input size.
+    for platform in ['cuda', 'rocm']:
+      register_lowering(
+          partial(cumred_gpu_impl, reduce_window_fn, reduce_fn), platform)
+
   return reducer_p
 
 cumsum_p = _cumulative_reduction_primitive("cumsum", lax.add, windowed_reductions._reduce_window_sum)
