@@ -14,12 +14,18 @@
 """Tests for AOT compilation."""
 
 import contextlib
+import glob
+import logging
+import os
+import tempfile
 import unittest
 from absl.testing import absltest
 import jax
 from jax._src import core
 from jax._src import test_util as jtu
+from jax._src import xla_bridge
 from jax._src.lib import xla_client as xc
+from jax._src.lib import xla_extension
 from jax.experimental import topologies
 from jax.experimental.pjit import pjit
 from jax.experimental.serialize_executable import (
@@ -110,6 +116,41 @@ class JaxAotTest(jtu.JaxTestCase):
     self.assertEqual(
         topo.platform_version, aot_topo.devices[0].client.platform_version
     )
+
+  @jtu.run_on_devices('tpu')
+  def test_tpu_profiler_registered_get_topology_from_devices(self):
+    if not xla_bridge.using_pjrt_c_api():
+      raise unittest.SkipTest('Profiler plugin only works with plugin backend')
+
+    try:
+      _ = topologies.get_topology_desc(
+          topology_name='fake_topology',
+          platform='tpu',
+      )
+    except xla_extension.XlaRuntimeError:
+      logging.info('Expected to fail to get topology')
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      try:
+        jax.profiler.start_trace(tmpdir)
+        jax.pmap(lambda x: jax.lax.psum(x + 1, 'i'), axis_name='i')(
+            jnp.ones(jax.local_device_count())
+        )
+      finally:
+        jax.profiler.stop_trace()
+
+      proto_path = glob.glob(
+          os.path.join(tmpdir, '**/*.xplane.pb'), recursive=True
+      )
+      self.assertLen(proto_path, 1)
+      with open(proto_path[0], 'rb') as f:
+        proto = f.read()
+      # Sanity check that serialized proto contains host, and Python traces
+      # without deserializing.
+      self.assertIn(b'/host:CPU', proto)
+      if jtu.test_device_matches(['tpu']):
+        self.assertNotIn(b'/device:TPU', proto)
+      self.assertIn(b'pxla.py', proto)
 
 
 if __name__ == '__main__':
